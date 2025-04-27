@@ -1,0 +1,241 @@
+####################################
+#texas 
+## Tax code 11.27 - solar and wind energy 
+####################################
+
+import requests
+
+# URL you want to download
+url = "https://statutes.capitol.texas.gov/Docs/TX/htm/TX.11.htm#11.27"
+
+# Send request with headers
+headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+}
+response = requests.get(url, headers=headers)
+
+if response.status_code == 200:
+    with open("texas_property_tax_11-27.html", "w", encoding="utf-8") as file:
+        file.write(response.text)
+    print("✅ Page downloaded successfully and saved as texas_property_tax_11-27.html")
+else:
+    print(f"❌ Failed to download page. Status code: {response.status_code}")
+
+#########################################################
+#oklahoma
+#Title 68 renewable
+#########################################################
+
+# URL of the PDF
+url = "https://oksenate.gov/sites/default/files/2022-05/os68.pdf"
+
+# Local filename where you want to save it
+output_file = "oklahoma_title_68.pdf"
+
+# Set headers to mimic a browser
+headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+}
+
+# Send GET request
+response = requests.get(url, headers=headers)
+
+# Check if the request was successful
+if response.status_code == 200:
+    # Write the content to a local file
+    with open(output_file, 'wb') as f:
+        f.write(response.content)
+    print(f"✅ PDF downloaded and saved as {output_file}")
+else:
+    print(f"❌ Failed to download PDF. Status code: {response.status_code}")
+
+#############################################
+#new mexico-  Chapter 7 (Taxation), Article 2A - sections 19 - 28
+#############################################
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from bs4 import BeautifulSoup
+import time
+import os
+import requests
+
+# Setup headless browser
+options = Options()
+options.add_argument("--headless")
+options.add_argument("--disable-gpu")
+options.add_argument("--no-sandbox")
+
+driver = webdriver.Chrome(options=options)
+
+# List of exact URLs to scrape
+urls = [
+    "https://law.justia.com/codes/new-mexico/chapter-7/article-2a/section-7-2a-19/",
+    "https://law.justia.com/codes/new-mexico/chapter-7/article-2a/section-7-2a-19-1/",
+    "https://law.justia.com/codes/new-mexico/chapter-7/article-2a/section-7-2a-19-2/",
+    "https://law.justia.com/codes/new-mexico/chapter-7/article-2a/section-7-2a-19-3/",
+    "https://law.justia.com/codes/new-mexico/chapter-7/article-2a/section-7-2a-21/",
+    "https://law.justia.com/codes/new-mexico/chapter-7/article-2a/section-7-2a-24/",
+    "https://law.justia.com/codes/new-mexico/chapter-7/article-2a/section-7-2a-24-1/",
+    "https://law.justia.com/codes/new-mexico/chapter-7/article-2a/section-7-2a-26/",
+    "https://law.justia.com/codes/new-mexico/chapter-7/article-2a/section-7-2a-28/",
+    "https://law.justia.com/codes/new-mexico/chapter-7/article-2a/section-7-2a-28-1/"
+]
+
+# Create output directory
+os.makedirs("new_mexico_sections", exist_ok=True)
+
+# Scrape each URL
+for url in urls:
+    section = url.split("/")[-2]  # like 'section-7-2a-19-1'
+    print(f"Scraping {section} from {url}")
+
+    # Quick check
+    head_response = requests.get(url)
+    if head_response.status_code == 200:
+        driver.get(url)
+        time.sleep(5)
+
+        html = driver.page_source
+        soup = BeautifulSoup(html, "html.parser")
+
+        paragraphs = soup.find_all('p')
+
+        extracted_text = ""
+        for p in paragraphs:
+            para_text = p.get_text(strip=True)
+            if para_text:
+                extracted_text += para_text + "\n\n"
+
+        if extracted_text.strip():
+            output_file = os.path.join("new_mexico_sections", f"{section}.txt")
+            with open(output_file, 'w', encoding='utf-8') as f:
+                f.write(extracted_text)
+            print(f"✅ Saved {section} to {output_file}")
+        else:
+            print(f"❌ No paragraph text found for {section}")
+
+    else:
+        print(f"❌ Skipping {section} — page does not exist (status {head_response.status_code}).")
+
+driver.quit()
+
+print("\n✅ Finished scraping all available sections.")
+
+######################################################
+#Wyoming - title 39- includes info on solar and wind energy - year 1998? 
+######################################################
+
+# URL of the PDF
+url = "https://wyoleg.gov/statutes/compress/title39.pdf"
+
+# Local filename you want to save it as
+output_file = "wyoming_title39.pdf"
+
+# Set headers to pretend like a browser (optional but good practice)
+headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+}
+
+# Send GET request to fetch the file
+response = requests.get(url, headers=headers)
+
+# Check if the request was successful
+if response.status_code == 200:
+    with open(output_file, "wb") as f:
+        f.write(response.content)
+    print(f"✅ PDF downloaded and saved as {output_file}")
+else:
+    print(f"❌ Failed to download PDF. Status code: {response.status_code}")
+
+
+#############################################
+#Kansas - Article 2 (Property Exempt from Taxation) 
+    #   79-201w - https://www.ksrevisor.gov/statutes/chapters/ch79/079_002_0001w.html
+    #   79-259 Property exempt from taxation; certain electric transmission lines and appurtenances - https://www.ksrevisor.gov/statutes/chapters/ch79/079_002_0059.html
+#############################################
+
+import requests
+from bs4 import BeautifulSoup
+import os
+import time
+
+# URLs to scrape
+urls = {
+    "79-201w": "https://www.ksrevisor.gov/statutes/chapters/ch79/079_002_0001w.html",
+    "79-259": "https://www.ksrevisor.gov/statutes/chapters/ch79/079_002_0059.html"
+}
+
+# Create output folder
+os.makedirs("kansas_statutes", exist_ok=True)
+
+# Headers to mimic a browser
+headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+}
+
+# Mapping of starting text triggers (so we know where the law starts)
+start_triggers = {
+    "79-201w": "79-201w.",
+    "79-259": "79-259."
+}
+
+for name, url in urls.items():
+    print(f"Scraping {name} from {url}")
+
+    response = requests.get(url, headers=headers)
+
+    if response.status_code == 200:
+        soup = BeautifulSoup(response.text, "html.parser")
+
+        # Get ALL visible text inside the body
+        body_text = soup.get_text(separator="\n", strip=True)
+
+        # Find where the statute text actually begins
+        start_text = start_triggers[name]
+        start_idx = body_text.find(start_text)
+
+        if start_idx != -1:
+            extracted_text = body_text[start_idx:]
+
+            # Save to file
+            output_file = os.path.join("kansas_statutes", f"{name}.txt")
+            with open(output_file, "w", encoding="utf-8") as f:
+                f.write(extracted_text)
+
+            print(f"✅ Saved {name} to {output_file}")
+        else:
+            print(f"❌ Could not find starting point for {name}")
+    else:
+        print(f"❌ Failed to access {url} (Status code {response.status_code})")
+
+    # Be polite
+    time.sleep(2)
+
+print("\n✅ Finished scraping Kansas statutes.")
+
+######################################################
+#Colorado  - 2023 - Title 39 (Taxation)
+######################################################
+
+# URL of the PDF
+url = "https://leg.colorado.gov/sites/default/files/images/olls/crs2023-title-39.pdf"
+
+# Local filename to save
+output_file = "colorado_title_39_taxation.pdf"
+
+# Optional: headers to mimic a browser (helps avoid 403 errors sometimes)
+headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+}
+
+# Send GET request to fetch the file
+response = requests.get(url, headers=headers)
+
+# Check if the request succeeded
+if response.status_code == 200:
+    # Save the content
+    with open(output_file, "wb") as f:
+        f.write(response.content)
+    print(f"✅ PDF downloaded and saved as {output_file}")
+else:
+    print(f"❌ Failed to download PDF. Status code: {response.status_code}")
