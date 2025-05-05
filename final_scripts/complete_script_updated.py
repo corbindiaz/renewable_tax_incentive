@@ -16,6 +16,12 @@ import re
 from functools import reduce
 import numpy as np
 import json
+import re
+import time
+from typing import List, Union, Optional, Tuple
+import pandas as pd
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
 def law_data():
 # DOE and NREL Laws and Incentives Data #
@@ -455,18 +461,18 @@ def energy_data():
 # ========================
 # Download RECS Data Files
 # ========================
-def download_recs_files():
-    base_url_for_year = 'https://www.eia.gov/consumption/residential/data/'
-    response = requests.get(base_url_for_year)
-    response.raise_for_status()
-    soup = BeautifulSoup(response.text, 'html.parser')
+    def download_recs_files():
+        base_url_for_year = 'https://www.eia.gov/consumption/residential/data/'
+        response = requests.get(base_url_for_year)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, 'html.parser')
 
-    # Find available RECS years
-    year_links = soup.find_all('a', href=re.compile(r'^/consumption/residential/data/\d{4}/$'))
-    years = [int(re.search(r'\d{4}', link['href']).group()) for link in year_links]
-    if not years:
-        print("❌ No RECS years found.")
-        return
+        # Find available RECS years
+        year_links = soup.find_all('a', href=re.compile(r'^/consumption/residential/data/\d{4}/$'))
+        years = [int(re.search(r'\d{4}', link['href']).group()) for link in year_links]
+        if not years:
+            print("❌ No RECS years found.")
+            return
 
     year = max(years)
     base_path = os.path.join('Energy Data', 'RECS', str(year))
@@ -1244,13 +1250,381 @@ def merge_seds_and_total(seds_df, total_df):
     print(f"✅ Merged SEDS and Total Energy into metadata dataframe")
     return final_df
     
+
+# ─── Arkansas ────────────────────────────────────────────────────────────────
+
+def extract_history_marker_ark(text: str) -> Union[int, str, None]:
+    u4 = re.findall(r'\u2002(\d{4})', text)
+    if u4:
+        return int(u4[-1])
+    parts = re.split(r'History', text, maxsplit=1, flags=re.IGNORECASE)
+    history = parts[1] if len(parts) > 1 else text
+    m = re.search(r'Acts\s+(\d{4})', history)
+    if m:
+        return int(m.group(1))
+    m2 = re.search(r'Source:\s*L\.\s*(\d{4})', history)
+    if m2:
+        return int(m2.group(1))
+    u2 = re.findall(r'\u2002(\d{2})', text)
+    if u2:
+        return int(u2[-1])
+    m3 = re.search(r'Acts\s+(\d{2})', history)
+    if m3:
+        return int(m3.group(1))
+    m4 = re.search(r'Source:\s*L\.\s*(\d{2})', history)
+    if m4:
+        return int(m4.group(1))
+    if re.search(r'\[Reserved\.\]', history, re.IGNORECASE):
+        return "Reserved"
+    if re.search(r'\[Repealed\.\]', history, re.IGNORECASE):
+        return "Repealed"
+    return None
+
+def trim_to_body_ark(text: str) -> str:
+    marker = "\n\n\n"
+    idx = text.find(marker)
+    if idx != -1:
+        return text[idx+len(marker):]
+    parts = re.split(r'(?:\r?\n){3,}', text, maxsplit=1)
+    return parts[1] if len(parts)>1 else text
+
+def scrape_arkansas_df() -> pd.DataFrame:
+    texts: List[str] = []
+    start = time.time()
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.goto(
+            "https://advance.lexis.com/container?config=00JAA3ZTU0NTIzYy0zZDEyLTRhYmQtYmRmMS1iMWIxNDgxYWMxZTQK"
+            "AFBvZENhdGFsb2cubRW4ifTiwi5vLw6cI1uX&crid=8efec3df-f9c3-48dd-af22-2d09db950145", 
+            wait_until="networkidle"
+        )
+        try:
+            page.wait_for_selector("input#btnagreeterms", timeout=5_000)
+            page.click("input#btnagreeterms")
+        except PWTimeout:
+            pass
+
+        page.fill("textarea#searchTerms", "energy")
+        page.press("textarea#searchTerms","Enter")
+        page.wait_for_load_state("networkidle")
+
+        while True:
+            if time.time()-start > 600:
+                break
+            page.wait_for_selector("li.usview", timeout=20_000)
+            hits = page.locator("li.usview")
+            n = hits.count()
+            for i in range(n):
+                if time.time()-start>600:
+                    break
+                hits.nth(i).locator("p.min.vis a").first.click()
+                page.wait_for_load_state("networkidle")
+                page.wait_for_selector("section#document", timeout=10_000)
+                texts.append(page.inner_text("section#document"))
+                page.go_back()
+                page.wait_for_load_state("networkidle")
+            time.sleep(1)
+            try:
+                nxt = page.locator("nav.pagination >> a:has-text('Next')")
+                if nxt.count() and nxt.first.is_visible():
+                    nxt.first.click()
+                    page.wait_for_load_state("networkidle")
+                    continue
+            except PWTimeout:
+                pass
+            break
+        browser.close()
+
+    # dedupe + build DF
+    seen = set(); uniq = []
+    for t in texts:
+        if t not in seen:
+            seen.add(t); uniq.append(t)
+    df = pd.DataFrame(uniq, columns=["text"])
+    df["year"] = df["text"].apply(extract_history_marker_ark)
+    df["text"] = df["text"].apply(trim_to_body_ark)
+    df = df[df["year"].notnull()].copy()
+    df["year"] = df["year"].apply(lambda y: (1900+y) if isinstance(y,int) and y<100 else y)
+    df["location"] = "Arkansas"
+    return df[["year","location","text"]]
+
+# ─── Georgia ────────────────────────────────────────────────────────────────
+
+def extract_history_marker_ga(text: str) -> Union[int, str, None]:
+    m = re.search(r'Ga\.\s*L\.\s*(\d{4})', text)
+    if m:
+        return int(m.group(1))
+    if re.search(r'\[Reserved\.\]', text, re.IGNORECASE):
+        return "Reserved"
+    if re.search(r'\[Repealed\.\]', text, re.IGNORECASE):
+        return "Repealed"
+    return None
+
+def trim_to_body_ga(text: str) -> str:
+    marker="\n\n\n"; idx=text.find(marker)
+    if idx!=-1: return text[idx+len(marker):]
+    parts=re.split(r'(?:\r?\n){3,}', text, maxsplit=1)
+    return parts[1] if len(parts)>1 else text
+
+def scrape_georgia_df() -> pd.DataFrame:
+    texts=[]; start=time.time()
+    with sync_playwright() as p:
+        browser=p.chromium.launch(headless=True)
+        page=browser.new_page()
+        page.goto(
+            "https://advance.lexis.com/container?config=00JAAzZDgzNzU2ZC05MDA0LTRmMDItYjkzMS0xOGY3MjE3OWNlODIK"
+            "AFBvZENhdGFsb2fcIFfJnJ2IC8XZi1AYM4Ne&crid=d1ef0e4a-f560-4a3f-bca1-09d66269998b",
+            wait_until="networkidle"
+        )
+        try:
+            page.wait_for_selector("input#btnagreeterms", timeout=5_000)
+            page.click("input#btnagreeterms")
+        except PWTimeout:
+            pass
+
+        page.fill("textarea#searchTerms","energy")
+        page.press("textarea#searchTerms","Enter")
+        page.wait_for_load_state("networkidle")
+
+        while True:
+            if time.time()-start>600: break
+            page.wait_for_selector("li.usview", timeout=20_000)
+            hits=page.locator("li.usview"); n=hits.count()
+            for i in range(n):
+                if time.time()-start>600: break
+                try:
+                    hits.nth(i).locator("p.min.vis a").first.click()
+                    page.wait_for_load_state("networkidle")
+                    page.wait_for_selector("section#document",timeout=10_000)
+                    texts.append(page.inner_text("section#document"))
+                except:
+                    texts.append("")
+                finally:
+                    try:
+                        page.go_back(); page.wait_for_load_state("networkidle")
+                    except: pass
+            time.sleep(1)
+            try:
+                nxt=page.locator("nav.pagination >> a[data-action='nextpage']").first
+                if nxt.count() and nxt.is_visible():
+                    nxt.click(); page.wait_for_load_state("networkidle"); continue
+            except PWTimeout:
+                pass
+            break
+        browser.close()
+
+    seen=set(); uniq=[]
+    for t in texts:
+        if t not in seen:
+            seen.add(t); uniq.append(t)
+    df=pd.DataFrame(uniq,columns=["text"])
+    df["year"]=df["text"].apply(extract_history_marker_ga)
+    df=df[df["year"].notnull()].copy()
+    df["text"]=df["text"].apply(trim_to_body_ga)
+    df["year"]=df["year"].apply(lambda y:(1900+y) if isinstance(y,int) and y<100 else y)
+    df["location"]="Georgia"
+    return df[["year","location","text"]]
+
+# ─── Colorado ───────────────────────────────────────────────────────────────
+
+def extract_history_marker_co(text:str)->Union[int,str,None]:
+    # same logic as Arkansas
+    return extract_history_marker_ark(text)
+
+def trim_to_body_co(text:str)->str:
+    return trim_to_body_ark(text)
+
+def scrape_colorado_df()->pd.DataFrame:
+    texts=[]; start=time.time()
+    with sync_playwright() as p:
+        browser=p.chromium.launch(headless=True)
+        page=browser.new_page()
+        page.goto(
+            "https://advance.lexis.com/container?config=00JAA3ZTU0NTIzYy0zZDEyLTRhYmQtYmRmMS1iMWIxNDgxYWMxZTQK"
+            "AFBvZENhdGFsb2cubRW4ifTiwi5vLw6cI1uX&crid=71f400f1-686d-4c50-8ecc-7711eca7c5a8",
+            wait_until="networkidle"
+        )
+        try:
+            page.wait_for_selector("input#btnagreeterms",timeout=5_000)
+            page.click("input#btnagreeterms")
+        except PWTimeout:
+            pass
+
+        page.fill("textarea#searchTerms","energy")
+        page.press("textarea#searchTerms","Enter")
+        page.wait_for_load_state("networkidle")
+
+        while True:
+            if time.time()-start>600: break
+            page.wait_for_selector("li.usview",timeout=20_000)
+            hits=page.locator("li.usview"); n=hits.count()
+            for i in range(n):
+                if time.time()-start>600: break
+                hits.nth(i).locator("p.min.vis a").first.click()
+                page.wait_for_load_state("networkidle")
+                page.wait_for_selector("section#document",timeout=10_000)
+                texts.append(page.inner_text("section#document"))
+                page.go_back(); page.wait_for_load_state("networkidle")
+            time.sleep(1)
+            try:
+                nxt=page.locator("nav.pagination >> a:has-text('Next')")
+                if nxt.count() and nxt.first.is_visible():
+                    nxt.first.click(); page.wait_for_load_state("networkidle"); continue
+            except PWTimeout:
+                pass
+            break
+        browser.close()
+
+    seen=set(); uniq=[]
+    for t in texts:
+        if t not in seen:
+            seen.add(t); uniq.append(t)
+    df=pd.DataFrame(uniq,columns=["text"])
+    df["year"]=df["text"].apply(extract_history_marker_co)
+    df["text"]=df["text"].apply(trim_to_body_co)
+    df=df[df["year"].notnull()].copy()
+    df["year"]=df["year"].apply(lambda y:(1900+y) if isinstance(y,int) and y<100 else y)
+    df["location"]="Colorado"
+    return df[["year","location","text"]]
+
+# ─── Delaware ───────────────────────────────────────────────────────────────
+
+def extract_last_approval_year_de(text:str)->Optional[int]:
+    pattern = r"""(?:Approved|Passed(?:\s+at\s+[^,]+)?),?\s*[A-Za-z]+\s+\d{1,2}(?:[.,]\s*)(?:A\.\s*D\.\s*)?(\d{4})"""
+    m = list(re.finditer(pattern,text,flags=re.IGNORECASE|re.VERBOSE))
+    return int(m[-1].group(1)) if m else None
+
+def scrape_delaware_df()->pd.DataFrame:
+    # step 1: gather section links
+    section_urls=[]; start=time.time()
+    with sync_playwright() as p:
+        b=p.chromium.launch(headless=True); pg=b.new_page(viewport={"width":1280,"height":800})
+        pg.goto("https://delcode.delaware.gov/",wait_until="networkidle")
+        pg.fill("input#srch-term","energy"); pg.click("button[onclick='submitSearch()']")
+        pg.wait_for_selector("#SearchResultsGrid tbody tr.k-master-row",timeout=15_000)
+        page_num=1
+        while True:
+            if time.time()-start>600: break
+            rows=pg.locator("#SearchResultsGrid tbody tr.k-master-row"); cnt=rows.count()
+            for i in range(cnt):
+                if time.time()-start>600: break
+                cells=rows.nth(i).locator("td[role='gridcell']")
+                if cells.count()>=4:
+                    link=cells.nth(3).locator("a").first
+                    href=link.get_attribute("href"); txt=link.inner_text().strip()
+                    if href:
+                        full=href if href.startswith("http") else "https://delcode.delaware.gov"+href
+                        section_urls.append((full,txt))
+            # next?
+            if pg.locator("li.k-pager-nav.k-state-disabled").count(): break
+            pg.click("a.k-link.k-pager-nav[title='Go to the next page']")
+            pg.wait_for_selector("#SearchResultsGrid tbody tr.k-master-row",timeout=15_000)
+            page_num+=1
+        b.close()
+
+    # step 2: get chapter links per section
+    chap_urls=[]; start=time.time()
+    for url,sec in section_urls:
+        if time.time()-start>600: break
+        with sync_playwright() as p:
+            b=p.chromium.launch(headless=True); pg=b.new_page()
+            pg.goto(url,wait_until="domcontentloaded")
+            js=f"""() => {{
+              const head=document.querySelector("div.SectionHead[id='{sec}']");
+              if(!head)return[];
+              const s=head.closest("div.Section");
+              return Array.from(s.querySelectorAll("a")).map(a=>[a.href,a.textContent.trim()]);
+            }}"""
+            raw=pg.evaluate(js); b.close()
+        for href, _ in raw:
+            if href not in chap_urls:
+                chap_urls.append(href)
+
+    # step 3: fetch body + extract year
+    docs=[]; years=[]
+    start=time.time()
+    for u in chap_urls:
+        if time.time()-start>600: break
+        with sync_playwright() as p:
+            b=p.chromium.launch(headless=True); pg=b.new_page()
+            pg.goto(u,wait_until="domcontentloaded")
+            pg.wait_for_selector("div#chapterBody",timeout=10_000)
+            txt=pg.inner_text("div#chapterBody"); b.close()
+        docs.append(txt); years.append(extract_last_approval_year_de(txt))
+
+    df=pd.DataFrame({"year":years,"text":docs}).dropna(subset=["year"])
+    df["location"]="Delaware"
+    return df[["year","location","text"]]
+
+# ─── Florida ────────────────────────────────────────────────────────────────
+
+def extract_original_enactment_year_fl(h:str)->Optional[int]:
+    parts=re.split(r'\n\n—\s*History\s*—\n\n',h,flags=re.IGNORECASE)
+    if len(parts)<2: return None
+    m=re.search(r'ch\.\s*(\d{2,4})-',parts[1])
+    if not m: return None
+    raw=int(m.group(1))
+    return (1900+raw) if raw<100 and raw>=50 else (2000+raw) if raw<50 else raw
+
+def scrape_florida_df()->pd.DataFrame:
+    links=[]; start=time.time()
+    with sync_playwright() as p:
+        b=p.firefox.launch(headless=True); pg=b.new_page()
+        pg.goto("https://www.flsenate.gov/laws/statutes",wait_until="domcontentloaded")
+        pg.fill("input#filteredData_StatuteSearchQuery","energy")
+        pg.click("input[name='StatutesGoSubmit']")
+        pg.wait_for_selector("table.tbl.width100 a",timeout=10_000)
+        for a in pg.query_selector_all("table.tbl.width100 a"):
+            href=a.get_attribute("href"); txt=a.inner_text().strip()
+            if href:
+                links.append((txt,f"https://www.flsenate.gov{href}"))
+        b.close()
+
+    docs=[]; years=[]
+    for i,(_,url) in enumerate(links,1):
+        if time.time()-start>600: break
+        try:
+            with sync_playwright() as p:
+                b=p.chromium.launch(headless=True); pg=b.new_page()
+                pg.goto(url,wait_until="domcontentloaded")
+                pg.wait_for_selector("span.SectionBody div.Paragraph",timeout=10_000)
+                paras=pg.locator("span.SectionBody div.Paragraph").all_text_contents()
+                body="\n\n".join(p.strip() for p in paras if p.strip())
+                hl=pg.locator("div.History span.HistoryText")
+                hist=hl.count() and hl.inner_text().strip() or ""
+                full=(f"{body}\n\n— History —\n\n{hist}" if hist else body)
+                b.close()
+            docs.append(full)
+            years.append(extract_original_enactment_year_fl(full))
+        except:
+            docs.append(""); years.append(None)
+
+    df=pd.DataFrame({"year":years,"text":docs}).dropna(subset=["year"])
+    df["location"]="Florida"
+    return df[["year","location","text"]]
+
+# ─── Combine & Save state data ────────────────────────────────────────────────────────
+dfs = [
+    scrape_arkansas_df(),
+    scrape_georgia_df(),
+    scrape_colorado_df(),
+    scrape_delaware_df(),
+    scrape_florida_df(),
+]
+combined_state = pd.concat(dfs, ignore_index=True)
+combined_state["metadata"]  = combined_state["text"]
+combined_state["state"]  = combined_state["location"]
+combined_state = combined_state[['year', 'state', 'metadata']]
+
 def final_concat():
     # 🛠 Step 1: Concatenate all datasets
     combined_df = pd.concat([
         atb_df,
         recs_df,
         rmi_df,
-        seds_and_total_df
+        seds_and_total_df,
+        combined_state
     ], axis=0, ignore_index=True)
     
     # Step 2: State abbreviation → full state name
